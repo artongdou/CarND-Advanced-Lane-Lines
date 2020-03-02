@@ -11,7 +11,7 @@ class Camera:
         self.M, self.M_inv = self.calc_perspective_trnsfm_matrix()
     
     def calc_perspective_trnsfm_matrix(self, margin=300):
-        src = np.float32([[(595,450),(690,450),(1108,719),(210, 719)]])
+        src = np.float32([[(578,465),(707,465),(1108,719),(210, 719)]])
         dst = np.float32([(margin,0),(1280-margin,0),(1280-margin,719),(margin,719)])
         M = cv2.getPerspectiveTransform(src, dst)
         M_inv = cv2.getPerspectiveTransform(dst, src)
@@ -68,6 +68,88 @@ class Camera:
         return mtx, dist, rvecs, tvecs
 
 # myCamera = Camera()
+# Define a class to receive the characteristics of each line detection
+class Line():
+    # Define conversions in x and y from pixels space to meters
+    ym_per_pix = 3/100 # meters per pixel in y dimension
+    xm_per_pix = 3.7/700 # meters per pixel in x dimension
+
+    def __init__(self):
+        # was the line detected in the last iteration?
+        self.detected = False  
+        # x values of the last n fits of the line
+        self.recent_xfitted = [] 
+        #average x values of the fitted line over the last n iterations
+        self.bestx = None     
+        #polynomial coefficients averaged over the last n iterations
+        self.best_fit = None  
+        #polynomial coefficients for the most recent fit
+        self.current_fit = [np.array([False])]  
+        #radius of curvature for the most recent fit
+        self.current_curvature = None
+        #radius of curvature of the line in some units
+        self.best_curvature = None 
+        #distance in meters of vehicle center from the line
+        self.line_base_pos = None 
+        #difference in fit coefficients between last and new fits
+        self.diffs = np.array([0,0,0], dtype='float') 
+        #x values for detected line pixels
+        self.allx = None  
+        #y values for detected line pixels
+        self.ally = None
+
+    def eval_poly(self, ploty):
+        fitx = (self.best_fit[0]*ploty**2 + self.best_fit[1]*ploty + self.best_fit[2])
+        return fitx
+
+    def update_current_fit(self, allx, ally):
+        self.current_fit = np.polyfit(ally, allx, 2)
+        self.allx = allx
+        self.ally = ally
+
+    def update_current_curvature(self, y_pix):
+        """calculate R_curve (radius of curvature) based on the current fit"""
+        y = y_pix/Line.ym_per_pix
+        fit_real = [Line.xm_per_pix*self.current_fit[0]/(Line.ym_per_pix**2), Line.xm_per_pix*self.current_fit[1]/Line.ym_per_pix, self.current_fit[2]*Line.xm_per_pix]
+        self.current_curvature = ((1 + (2*fit_real[0]*y*Line.ym_per_pix + fit_real[1])**2)**1.5) / np.absolute(2*fit_real[0])
+
+    def update_best_fit(self, filter_coeff = 0.9):
+        if self.best_fit is None:
+            self.best_fit = self.current_fit
+        else:
+            self.best_fit = self.current_fit*filter_coeff + (1 - filter_coeff)*self.best_fit
+
+    def update_best_curvature(self, filter_coeff = 0.9):
+        """
+        Calculates the curvature of polynomial functions in meters.
+        """
+        if self.best_curvature is None:
+            self.best_curvature = self.current_curvature
+        else:
+            self.best_curvature = self.current_curvature*filter_coeff + (1 - filter_coeff)*self.best_curvature
+
+    def sanity_check(self, other):
+        return self.check_parallel(other)  
+
+    def check_parallel(self, other):
+        y_max = 719
+        y_min = 0
+        # Calculate distance at the top
+        left_fitx = self.current_fit[0]*y_min**2 + self.current_fit[1]*y_min + self.current_fit[2]
+        right_fitx = other.current_fit[0]*y_min**2 + other.current_fit[1]*y_min + other.current_fit[2]
+        dist_top = right_fitx - left_fitx
+        # Calculate distance at the bottom
+        left_fitx = self.current_fit[0]*y_max**2 + self.current_fit[1]*y_max + self.current_fit[2]
+        right_fitx = other.current_fit[0]*y_max**2 + other.current_fit[1]*y_max + other.current_fit[2]
+        dist_bot = right_fitx - left_fitx
+        # Metric
+        dist_avg = np.mean([dist_bot, dist_top])*Line.xm_per_pix
+        dist_diff = np.absolute((dist_top - dist_bot)*Line.xm_per_pix)
+
+        if 3.5 <= dist_avg <= 4 and dist_diff <= 0.5:
+            return True
+        else:
+            return False
 
 from moviepy.editor import VideoFileClip
 from IPython.display import HTML
@@ -76,10 +158,11 @@ def find_filename(path_to_file):
     return path_to_file.split('/')[-1]
 
 class LaneFinding:
-    def __init__(self, camera):
+    def __init__(self, camera, left_lane, right_lane):
         """camera a Camera object"""
         self.camera = camera
-        pass
+        self.left_lane = left_lane
+        self.right_lane = right_lane
 
     def hls_select(self, img, thresh=(0,255)):
         hls = cv2.cvtColor(img, cv2.COLOR_BGR2HLS)
@@ -117,8 +200,39 @@ class LaneFinding:
         bin_img = np.zeros_like(gray)
         bin_img[(sobel_angle > thresh[0]) & (sobel_angle <= thresh[1])] = 1
         return bin_img
+
+    def search_around_poly(self, binary_warped, margin = 100):
+        """Search around last fitted line and return detected pixels"""
+
+        # Grab activated pixels
+        nonzero = binary_warped.nonzero()
+        nonzeroy = np.array(nonzero[0])
+        nonzerox = np.array(nonzero[1])
+
+        # Grab the current ploy fit coefficient
+        left_fit = self.left_lane.best_fit
+        right_fit = self.right_lane.best_fit
+        
+        ### TO-DO: Set the area of search based on activated x-values ###
+        ### within the +/- margin of our polynomial function ###
+        ### Hint: consider the window areas for the similarly named variables ###
+        ### in the previous quiz, but change the windows to our new search area ###
+        left_lane_inds = ((nonzerox > (left_fit[0]*(nonzeroy**2) + left_fit[1]*nonzeroy + 
+                        left_fit[2] - margin)) & (nonzerox < (left_fit[0]*(nonzeroy**2) + 
+                        left_fit[1]*nonzeroy + left_fit[2] + margin)))
+        right_lane_inds = ((nonzerox > (right_fit[0]*(nonzeroy**2) + right_fit[1]*nonzeroy + 
+                        right_fit[2] - margin)) & (nonzerox < (right_fit[0]*(nonzeroy**2) + 
+                        right_fit[1]*nonzeroy + right_fit[2] + margin)))
+        
+        # Again, extract left and right line pixel positions
+        leftx = nonzerox[left_lane_inds]
+        lefty = nonzeroy[left_lane_inds] 
+        rightx = nonzerox[right_lane_inds]
+        righty = nonzeroy[right_lane_inds]
+
+        return leftx, lefty, rightx, righty
     
-    def find_lane_pixels(self, binary_warped):
+    def search_in_win(self, binary_warped):
         # Take a histogram of the bottom half of the image
         histogram = np.sum(binary_warped[binary_warped.shape[0]//2:,:], axis=0)
         # Create an output image to draw on and visualize the result
@@ -193,26 +307,41 @@ class LaneFinding:
         rightx = nonzerox[right_lane_inds]
         righty = nonzeroy[right_lane_inds]
 
-        return leftx, lefty, rightx, righty, out_img
+        return leftx, lefty, rightx, righty
     
     def fit_polynomial(self, binary_warped):
-        # Find our lane pixels first
-        leftx, lefty, rightx, righty, out_img = self.find_lane_pixels(binary_warped)
+        if self.left_lane.detected and self.right_lane.detected:
+            leftx, lefty, rightx, righty = self.search_around_poly(binary_warped)    
+        else:
+            leftx, lefty, rightx, righty = self.search_in_win(binary_warped)
 
-        # Fit a second order polynomial to each using `np.polyfit`
-        left_fit = np.polyfit(lefty, leftx, 2)
-        right_fit = np.polyfit(righty, rightx, 2)
+        # update left and right lane polyfit and update measured curvature
+        self.left_lane.update_current_fit(leftx, lefty)
+        self.left_lane.update_current_curvature(binary_warped.shape[0]-10)
+        self.right_lane.update_current_fit(rightx, righty)
+        self.right_lane.update_current_curvature(binary_warped.shape[0]-10)
+        
+        if Line.sanity_check(self.left_lane, self.right_lane):
+            self.left_lane.detected = True
+            self.right_lane.detected = True
+            self.left_lane.update_best_fit()
+            self.right_lane.update_best_fit()
+            self.left_lane.update_best_curvature(0.72)
+            self.right_lane.update_best_curvature(0.72)
+        else:
+            self.left_lane.detected = False
+            self.right_lane.detected = False
 
         # Generate x and y values for plotting
-        ploty = np.linspace(0, binary_warped.shape[0]-1, binary_warped.shape[0] )
+        ploty = np.linspace(0, binary_warped.shape[0]-1, binary_warped.shape[0] )    
+        left_fitx = self.left_lane.eval_poly(ploty)
+        right_fitx = self.right_lane.eval_poly(ploty)
+
+        # Measure the curvature in front of vehicle
+        # print(left_curverad, right_curverad)
         
-        left_fitx = (left_fit[0]*ploty**2 + left_fit[1]*ploty + left_fit[2])
-        right_fitx = (right_fit[0]*ploty**2 + right_fit[1]*ploty + right_fit[2])
 
         ## Visualization ##
-        # Colors in the left and right lane regions
-        # out_img[lefty, leftx] = [255, 0, 0]
-        # out_img[righty, rightx] = [0, 0, 255]
 
         # Plots the left and right polynomials on the lane lines
         # cv2.polylines(out_img, np.vstack((left_fitx, ploty)).T.astype("uint32"), False, color=[255, 0, 255])
@@ -226,24 +355,33 @@ class LaneFinding:
         pts = np.hstack((pts_left, pts_right))
 
         # Draw the lane onto the warped blank image
+        out_img = np.dstack((binary_warped,binary_warped,binary_warped))
         cv2.fillPoly(out_img, np.int_([pts]), (0,255, 0))
+        # Colors in the left and right lane regions
+        out_img[lefty, leftx] = [255, 0, 0]
+        out_img[righty, rightx] = [0, 0, 255]
 
         return out_img
+
 
     def process_image(self, img):
         """return a color image"""
         undist_img = self.camera.undistort_image(img)
-        bin_dir = self.sobel_dir_select(undist_img, 15, (0.7,1.3))
-        bin_mag = self.sobel_mag_select(undist_img,15,(100,255))
+        bin_dir = self.sobel_dir_select(undist_img, 15, (0.8,1.2))
+        bin_mag = self.sobel_mag_select(undist_img,15,(50,255))
         bin_s = self.hls_select(undist_img, thresh=(120,255))
         bin_sobelx = self.sobel_1Dselect(undist_img,'x',15,(30,255))
         bin_sobely = self.sobel_1Dselect(undist_img,'y',15,(30,255))
         # Combine filters
-        bin_img = (bin_s | (bin_sobelx&bin_sobely & bin_dir))*255
+        # bin_img = (bin_s | (bin_sobelx&bin_sobely & bin_dir))*255
+        bin_img = (bin_sobely&bin_sobelx) | (bin_s&bin_dir)
         bin_warped_img = self.camera.perspective_trnsfm(bin_img, self.camera.M)
         lane_mark_mask = self.fit_polynomial(bin_warped_img)
         lane_mark_mask = self.camera.perspective_trnsfm(lane_mark_mask, self.camera.M_inv)
         result = cv2.addWeighted(undist_img, 1, lane_mark_mask, 0.3, 0)
+        # Draw text
+        text = "Curvature: {:.0f} meter".format((self.left_lane.best_curvature + self.left_lane.best_curvature)/2)
+        cv2.putText(result, text, (20, 200), cv2.FONT_HERSHEY_SIMPLEX , 2, color=[0,0,0], thickness=2)
         return result
 
     def process_video(self, path_to_video, output_dir = 'output_video', sub_clip = None):
@@ -257,23 +395,10 @@ class LaneFinding:
         white_clip = clip.fl_image(self.process_image) #NOTE: this function expects color images!!
         white_clip.write_videofile(os.path.join(output_dir, find_filename(path_to_video)), audio=False)
 
-myLaneFinding = LaneFinding(Camera('camera_cal','output_cal'))
-myLaneFinding.process_video('project_video.mp4')
+def test():
+    left_lane = Line()
+    right_lane = Line()
+    myLaneFinding = LaneFinding(Camera('camera_cal','output_cal'), left_lane, right_lane)
+    myLaneFinding.process_video('project_video.mp4')
 
-# # Create folder to hold undistort images
-# dir_output_undist = 'output_undist'
-# if not os.path.exists(dir_output_undist):
-#     os.mkdir(dir_output_undist)
-# # Generate undistort images to verify
-# for fname in images:
-#     img = cv2.imread(fname)
-#     dst = cv2.undistort(img, mtx, dist, None, None)
-#     cv2.imwrite(os.path.join(dir_output_undist,fname.split('/')[-1]), dst)
-
-# img = cv2.imread('./test_images/straight_lines1.jpg')
-# dst = cv2.undistort(img, mtx, dist, None, None)
-# cv2.imwrite('test.jpg',dst)
-
-
-
-# # Define source and destination points for perspective transform
+test()
