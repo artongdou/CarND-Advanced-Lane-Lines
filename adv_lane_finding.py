@@ -99,23 +99,28 @@ class Line():
         self.ally = None
 
     def eval_best_fit(self, ploty):
-        fitx = self.best_fit[0]*ploty**2 + self.best_fit[1]*ploty + self.best_fit[2]
-        return fitx
+        return self.best_fit[0]*ploty**2 + self.best_fit[1]*ploty + self.best_fit[2]
     
     def eval_current_fit(self, ploty):
-        fitx = self.current_fit[0]*ploty**2 + self.current_fit[1]*ploty + self.current_fit[2]
+        return self.current_fit[0]*ploty**2 + self.current_fit[1]*ploty + self.current_fit[2]
 
     def update_current_fit(self, allx, ally):
         self.current_fit = np.polyfit(ally, allx, 2)
+        if self.best_fit is None:
+            self.best_fit = self.current_fit
         self.allx = allx
         self.ally = ally
         self.current_line_base_pos = self.eval_current_fit(719)
+        if self.best_line_base_pos is None:
+            self.best_line_base_pos = self.current_line_base_pos
 
     def update_current_curvature(self, y_pix, camera):
         """calculate R_curve (radius of curvature) based on the current fit"""
         y = y_pix/camera.ym_per_pix
         fit_real = [camera.xm_per_pix*self.current_fit[0]/(camera.ym_per_pix**2), camera.xm_per_pix*self.current_fit[1]/camera.ym_per_pix, self.current_fit[2]*camera.xm_per_pix]
         self.current_curvature = ((1 + (2*fit_real[0]*y*camera.ym_per_pix + fit_real[1])**2)**1.5) / np.absolute(2*fit_real[0])
+        if self.best_curvature is None:
+            self.best_curvature = self.current_curvature
 
     def update_best_line_base_pos(self, filter_coeff = 0.9):
         if self.best_line_base_pos is None:
@@ -350,18 +355,22 @@ class LaneFinding:
         if Line.check_parallel(self.left_lane, self.right_lane, self.camera):
             self.left_lane.detected = True
             self.right_lane.detected = True
-            self.left_lane.update_best_fit()
-            self.right_lane.update_best_fit()
+            self.left_lane.update_best_fit(0.72)
+            self.right_lane.update_best_fit(0.72)
+            self.left_lane.update_best_line_base_pos()
+            self.right_lane.update_best_line_base_pos()
             # self.left_lane.update_best_curvature(0.72)
             # self.right_lane.update_best_curvature(0.72)
         elif self.left_lane.detected and len(self.left_lane.allx) >= len(self.right_lane.allx):
                 # trust left lane detection
-                self.left_lane.update_best_fit()
+                self.left_lane.update_best_fit(0.72)
+                self.left_lane.update_best_line_base_pos()
                 self.right_lane.current_curvature = self.left_lane.best_curvature
                 self.right_lane.update_best_curvature(0.72)
         elif self.right_lane.detected and len(self.left_lane.allx) <= len(self.right_lane.allx):
             # trust right lane detection
-            self.right_lane.update_best_fit()
+            self.right_lane.update_best_fit(0.72)
+            self.right_lane.update_best_line_base_pos()
             self.left_lane.current_curvature = self.right_lane.best_curvature
             self.left_lane.update_best_curvature(0.72)
 
@@ -413,8 +422,10 @@ class LaneFinding:
         lane_mark_mask = self.camera.perspective_trnsfm(lane_mark_mask, self.camera.M_inv)
         result = cv2.addWeighted(undist_img, 1, lane_mark_mask, 0.9, 0)
         # Draw text
-        text = "Curvature: {:.0f} meter".format((self.left_lane.best_curvature + self.left_lane.best_curvature)/2)
-        cv2.putText(result, text, (20, 200), cv2.FONT_HERSHEY_SIMPLEX , 2, color=[0,0,0], thickness=2)
+        text = "Curvature: {:.0f} (m)".format((self.left_lane.best_curvature + self.left_lane.best_curvature)/2)
+        self.draw_text(result, text, (20, 100))
+        text = "Distance from lane center: {:.1f} (m)".format(((self.left_lane.best_line_base_pos+self.right_lane.best_line_base_pos)/2 - 960)*self.camera.xm_per_pix)
+        self.draw_text(result, text, (20, 200))
         return result
 
     def process_video(self, path_to_video, output_dir = 'output_video', sub_clip = None):
@@ -428,10 +439,13 @@ class LaneFinding:
         white_clip = clip.fl_image(self.process_image) #NOTE: this function expects color images!!
         white_clip.write_videofile(os.path.join(output_dir, find_filename(path_to_video)), audio=False)
 
+    def draw_text(self, img, text, loc):
+        cv2.putText(img, text, loc, cv2.FONT_HERSHEY_SIMPLEX , 2, color=[0,0,0], thickness=2)
+
 def test():
     left_lane = Line()
     right_lane = Line()
     myLaneFinding = LaneFinding(Camera('camera_cal','output_cal'), left_lane, right_lane)
-    myLaneFinding.process_video('project_video.mp4')
+    myLaneFinding.process_video('project_video.mp4',sub_clip=(38,43))
 
 test()
