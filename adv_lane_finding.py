@@ -8,14 +8,16 @@ import matplotlib.pyplot as plt
 class Camera:
     def __init__(self, dir_input, dir_output):
         self.mtx, self.dist, self.rvecs, self.tvecs = self.calibrateCamera(dir_input, dir_output)
-        self.M, self.M_inv = self.calc_perspective_trnsfm_matrix()
+        self.M, self.M_inv, self.xm_per_pix, self.ym_per_pix = self.calc_perspective_trnsfm_matrix()
     
     def calc_perspective_trnsfm_matrix(self, margin=300):
-        src = np.float32([[(578,465),(707,465),(1108,719),(210, 719)]])
+        ym_per_pix = 3/100 # meters per pixel in y dimension
+        xm_per_pix = 3.7/700 # meters per pixel in x dimension
+        src = np.float32([[(577,465),(706,465),(1108,719),(210, 719)]])
         dst = np.float32([(margin,0),(1280-margin,0),(1280-margin,719),(margin,719)])
         M = cv2.getPerspectiveTransform(src, dst)
         M_inv = cv2.getPerspectiveTransform(dst, src)
-        return M, M_inv
+        return M, M_inv, xm_per_pix, ym_per_pix
 
     def perspective_trnsfm(self, img, matrix):
         warped = cv2.warpPerspective(img, matrix, (img.shape[1], img.shape[0]), flags=cv2.INTER_LINEAR)
@@ -70,9 +72,6 @@ class Camera:
 # myCamera = Camera()
 # Define a class to receive the characteristics of each line detection
 class Line():
-    # Define conversions in x and y from pixels space to meters
-    ym_per_pix = 3/100 # meters per pixel in y dimension
-    xm_per_pix = 3.7/700 # meters per pixel in x dimension
 
     def __init__(self):
         # was the line detected in the last iteration?
@@ -90,7 +89,8 @@ class Line():
         #radius of curvature of the line in some units
         self.best_curvature = None 
         #distance in meters of vehicle center from the line
-        self.line_base_pos = None 
+        self.current_line_base_pos = None 
+        self.best_line_base_pos = None
         #difference in fit coefficients between last and new fits
         self.diffs = np.array([0,0,0], dtype='float') 
         #x values for detected line pixels
@@ -98,21 +98,31 @@ class Line():
         #y values for detected line pixels
         self.ally = None
 
-    def eval_poly(self, ploty):
-        fitx = (self.best_fit[0]*ploty**2 + self.best_fit[1]*ploty + self.best_fit[2])
+    def eval_best_fit(self, ploty):
+        fitx = self.best_fit[0]*ploty**2 + self.best_fit[1]*ploty + self.best_fit[2]
         return fitx
+    
+    def eval_current_fit(self, ploty):
+        fitx = self.current_fit[0]*ploty**2 + self.current_fit[1]*ploty + self.current_fit[2]
 
     def update_current_fit(self, allx, ally):
         self.current_fit = np.polyfit(ally, allx, 2)
         self.allx = allx
         self.ally = ally
+        self.current_line_base_pos = self.eval_current_fit(719)
 
-    def update_current_curvature(self, y_pix):
+    def update_current_curvature(self, y_pix, camera):
         """calculate R_curve (radius of curvature) based on the current fit"""
-        y = y_pix/Line.ym_per_pix
-        fit_real = [Line.xm_per_pix*self.current_fit[0]/(Line.ym_per_pix**2), Line.xm_per_pix*self.current_fit[1]/Line.ym_per_pix, self.current_fit[2]*Line.xm_per_pix]
-        self.current_curvature = ((1 + (2*fit_real[0]*y*Line.ym_per_pix + fit_real[1])**2)**1.5) / np.absolute(2*fit_real[0])
+        y = y_pix/camera.ym_per_pix
+        fit_real = [camera.xm_per_pix*self.current_fit[0]/(camera.ym_per_pix**2), camera.xm_per_pix*self.current_fit[1]/camera.ym_per_pix, self.current_fit[2]*camera.xm_per_pix]
+        self.current_curvature = ((1 + (2*fit_real[0]*y*camera.ym_per_pix + fit_real[1])**2)**1.5) / np.absolute(2*fit_real[0])
 
+    def update_best_line_base_pos(self, filter_coeff = 0.9):
+        if self.best_line_base_pos is None:
+            self.best_line_base_pos = self.current_line_base_pos
+        else:
+            self.best_line_base_pos = self.current_line_base_pos*filter_coeff + (1-filter_coeff)*self.best_line_base_pos
+    
     def update_best_fit(self, filter_coeff = 0.9):
         if self.best_fit is None:
             self.best_fit = self.current_fit
@@ -128,10 +138,15 @@ class Line():
         else:
             self.best_curvature = self.current_curvature*filter_coeff + (1 - filter_coeff)*self.best_curvature
 
-    def sanity_check(self, other):
-        return self.check_parallel(other)  
+    def self_check(self):
+        if self.best_curvature is None or self.current_curvature is None or self.best_line_base_pos is None:
+            return True
+        elif (np.absolute(self.best_curvature - self.current_curvature) <= 300) and np.absolute(self.best_line_base_pos - self.current_line_base_pos) <= 100:
+            return True
+        else:
+            return False
 
-    def check_parallel(self, other):
+    def check_parallel(self, other, camera):
         y_max = 719
         y_min = 0
         # Calculate distance at the top
@@ -143,8 +158,8 @@ class Line():
         right_fitx = other.current_fit[0]*y_max**2 + other.current_fit[1]*y_max + other.current_fit[2]
         dist_bot = right_fitx - left_fitx
         # Metric
-        dist_avg = np.mean([dist_bot, dist_top])*Line.xm_per_pix
-        dist_diff = np.absolute((dist_top - dist_bot)*Line.xm_per_pix)
+        dist_avg = np.mean([dist_bot, dist_top])*camera.xm_per_pix
+        dist_diff = np.absolute((dist_top - dist_bot)*camera.xm_per_pix)
 
         if 3.5 <= dist_avg <= 4 and dist_diff <= 0.5:
             return True
@@ -249,7 +264,7 @@ class LaneFinding:
         # Set the width of the windows +/- margin
         margin = 100
         # Set minimum number of pixels found to recenter window
-        minpix = 50
+        minpix = 500
 
         # Set height of windows - based on nwindows above and image shape
         window_height = np.int(binary_warped.shape[0]//nwindows)
@@ -317,25 +332,43 @@ class LaneFinding:
 
         # update left and right lane polyfit and update measured curvature
         self.left_lane.update_current_fit(leftx, lefty)
-        self.left_lane.update_current_curvature(binary_warped.shape[0]-10)
+        self.left_lane.update_current_curvature(binary_warped.shape[0]-10, self.camera)
+        if self.left_lane.self_check():
+            self.left_lane.update_best_curvature(0.9)
+            self.left_lane.detected = True
+        else:
+            self.left_lane.detected = False
+
         self.right_lane.update_current_fit(rightx, righty)
-        self.right_lane.update_current_curvature(binary_warped.shape[0]-10)
+        self.right_lane.update_current_curvature(binary_warped.shape[0]-10, self.camera)
+        if self.right_lane.self_check():
+            self.right_lane.update_best_curvature(0.9)
+            self.right_lane.detected = True
+        else:
+            self.right_lane.detected = False
         
-        if Line.sanity_check(self.left_lane, self.right_lane):
+        if Line.check_parallel(self.left_lane, self.right_lane, self.camera):
             self.left_lane.detected = True
             self.right_lane.detected = True
             self.left_lane.update_best_fit()
             self.right_lane.update_best_fit()
+            # self.left_lane.update_best_curvature(0.72)
+            # self.right_lane.update_best_curvature(0.72)
+        elif self.left_lane.detected and len(self.left_lane.allx) >= len(self.right_lane.allx):
+                # trust left lane detection
+                self.left_lane.update_best_fit()
+                self.right_lane.current_curvature = self.left_lane.best_curvature
+                self.right_lane.update_best_curvature(0.72)
+        elif self.right_lane.detected and len(self.left_lane.allx) <= len(self.right_lane.allx):
+            # trust right lane detection
+            self.right_lane.update_best_fit()
+            self.left_lane.current_curvature = self.right_lane.best_curvature
             self.left_lane.update_best_curvature(0.72)
-            self.right_lane.update_best_curvature(0.72)
-        else:
-            self.left_lane.detected = False
-            self.right_lane.detected = False
 
         # Generate x and y values for plotting
         ploty = np.linspace(0, binary_warped.shape[0]-1, binary_warped.shape[0] )    
-        left_fitx = self.left_lane.eval_poly(ploty)
-        right_fitx = self.right_lane.eval_poly(ploty)
+        left_fitx = self.left_lane.eval_best_fit(ploty)
+        right_fitx = self.right_lane.eval_best_fit(ploty)
 
         # Measure the curvature in front of vehicle
         # print(left_curverad, right_curverad)
@@ -378,7 +411,7 @@ class LaneFinding:
         bin_warped_img = self.camera.perspective_trnsfm(bin_img, self.camera.M)
         lane_mark_mask = self.fit_polynomial(bin_warped_img)
         lane_mark_mask = self.camera.perspective_trnsfm(lane_mark_mask, self.camera.M_inv)
-        result = cv2.addWeighted(undist_img, 1, lane_mark_mask, 0.3, 0)
+        result = cv2.addWeighted(undist_img, 1, lane_mark_mask, 0.9, 0)
         # Draw text
         text = "Curvature: {:.0f} meter".format((self.left_lane.best_curvature + self.left_lane.best_curvature)/2)
         cv2.putText(result, text, (20, 200), cv2.FONT_HERSHEY_SIMPLEX , 2, color=[0,0,0], thickness=2)
