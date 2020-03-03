@@ -126,4 +126,4 @@ One of the issues I faced is find the good tradeoff between using saturation thr
 
 Another issue came up during testing is that it will detect the edges on the curb instead of actual lane mark in some of the frames where lane mark is not obvious. I have to implement a sanity check of the line base position so that it filters out those mistakenly detected frames.
 
-Finally, I think in general this has consistent performance. But the polynomial fit on the dotted lane mark is still jumpping around after filtering. I'd like some advice on how I can improve that.
+Finally, I think in general this has consistent performance. But the polynomial fit on the dotted lane mark is still jumpping around after filtering. I'd like some advice on how I can improve that. And my algorithm is struggling on light color surface like concrete. I believe it is due to my combined filter relies on both saturation and gradient at the same time. It'd be nice to have a way to use saturation only in certain frames and use gradient on other frames.
