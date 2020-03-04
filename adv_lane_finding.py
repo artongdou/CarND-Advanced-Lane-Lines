@@ -16,13 +16,14 @@ class Camera:
         """
         self.mtx, self.dist, self.rvecs, self.tvecs = self.calibrateCamera(dir_input, dir_output)
         self.M, self.M_inv, self.xm_per_pix, self.ym_per_pix = self.calc_perspective_trnsfm_matrix()
+        self.xm_per_pix_unwarped = 3.7/950
     
     def calc_perspective_trnsfm_matrix(self, margin=300):
         """
         calculate perspective transform matrix
         """
-        ym_per_pix = 3/100 # meters per pixel in y dimension
-        xm_per_pix = 3.7/700 # meters per pixel in x dimension
+        ym_per_pix = 3/100 # meters per pixel in y dimension in warped image
+        xm_per_pix = 3.7/700 # meters per pixel in x dimension in warped image
         src = np.float32([[(577,465),(706,465),(1108,719),(210, 719)]])
         dst = np.float32([(margin,0),(1280-margin,0),(1280-margin,719),(margin,719)])
         M = cv2.getPerspectiveTransform(src, dst)
@@ -151,7 +152,8 @@ class Line():
         self.allx = allx
         self.ally = ally
         # save current fitted line base position at bottom of the image
-        self.current_line_base_pos = self.eval_current_fit(719)
+        y_base_warp = 719
+        self.current_line_base_pos = self.eval_current_fit(y_base_warp)
 
         # Update the best fit if it does not exist
         if self.best_fit is None:
@@ -461,36 +463,40 @@ class LaneFinding:
 
         # update right lane polyfit and update measured curvature
         self.right_lane.update_current_fit(rightx, righty)
-        self.right_lane.update_current_curvature(binary_warped.shape[0]-10, self.camera)
+        self.right_lane.update_current_curvature(binary_warped.shape[0], self.camera)
         # perform sanity check on detected right lane
         if self.right_lane.self_check():
-            self.right_lane.update_best_curvature(0.9)
+            self.right_lane.update_best_curvature(0.72)
             self.right_lane.detected = True
         else:
             self.right_lane.detected = False
+
+        # print(self.left_lane.current_curvature, self.right_lane.current_curvature)
         
         # perform sanity check on both left and right lane
         if Line.check_parallel(self.left_lane, self.right_lane, self.camera):
             self.left_lane.detected = True
             self.right_lane.detected = True
-            self.left_lane.update_best_fit(0.72)
-            self.right_lane.update_best_fit(0.72)
+            self.left_lane.update_best_fit()
+            self.right_lane.update_best_fit()
+            self.left_lane.update_best_curvature()
+            self.right_lane.update_best_curvature()
             self.left_lane.update_best_line_base_pos()
             self.right_lane.update_best_line_base_pos()
         elif self.left_lane.detected and len(self.left_lane.allx) >= len(self.right_lane.allx):
             # trust left lane detection
-            self.left_lane.update_best_fit(0.72)
+            self.left_lane.update_best_fit()
             self.left_lane.update_best_line_base_pos()
             # use left lane curvature as right lane curvature
             self.right_lane.current_curvature = self.left_lane.best_curvature
-            self.right_lane.update_best_curvature(0.72)
+            self.right_lane.update_best_curvature()
         elif self.right_lane.detected and len(self.left_lane.allx) <= len(self.right_lane.allx):
             # trust right lane detection
-            self.right_lane.update_best_fit(0.72)
+            self.right_lane.update_best_fit()
             self.right_lane.update_best_line_base_pos()
             # use right lane curvature as left lane curvature
             self.left_lane.current_curvature = self.right_lane.best_curvature
-            self.left_lane.update_best_curvature(0.72)
+            self.left_lane.update_best_curvature()
 
         # Generate x and y values for plotting using the best fitted line
         ploty = np.linspace(0, binary_warped.shape[0]-1, binary_warped.shape[0] )    
@@ -532,12 +538,16 @@ class LaneFinding:
         lane_mark_mask = self.find_lane_mark(bin_warped_img)
         # project the mask back to real world
         lane_mark_mask = self.camera.perspective_trnsfm(lane_mark_mask, self.camera.M_inv)
+        nonzero = lane_mark_mask[lane_mark_mask.shape[0]-1].nonzero()
+        left_lane_base = nonzero[0][0]
+        right_lane_base = nonzero[0][-1]
+        # print(left_lane_base, right_lane_base)
         # Overlay undistort images with lane mark mask
         result = cv2.addWeighted(undist_img, 1, lane_mark_mask, 0.3, 0)
         # Draw curvature and distance from center info
         text = "Curvature: {:.0f} (m)".format((self.left_lane.best_curvature + self.left_lane.best_curvature)/2)
         self.draw_text(result, text, (20, 100))
-        text = "Distance from lane center: {:.1f} (m)".format(((self.left_lane.best_line_base_pos+self.right_lane.best_line_base_pos)/2 - 960)*self.camera.xm_per_pix)
+        text = "Distance from lane center: {:.1f} (m)".format(((left_lane_base + right_lane_base)/2 - 640)*self.camera.xm_per_pix_unwarped)
         self.draw_text(result, text, (20, 200))
 
         return result

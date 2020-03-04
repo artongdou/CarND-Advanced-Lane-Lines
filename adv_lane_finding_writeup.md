@@ -24,7 +24,8 @@ The goals / steps of this project are the following:
 [image3]: ./writeup_imgs/binary_image.jpg "Binary Example"
 [image4]: ./writeup_imgs/perspective.jpg "Warp Example"
 [image5]: ./writeup_imgs/fit_poly.png "Fit Visual"
-[image6]: ./writeup_imgs/frame17.jpg "Output"
+[image6]: ./writeup_imgs/frame21.jpg "Output"
+[image7]: ./writeup_imgs/frame1029.jpg "Output"
 [video1]: ./output_video/project_video.mp4 "Video"
 
 ## [Rubric](https://review.udacity.com/#!/rubrics/571/view) Points
@@ -96,10 +97,10 @@ I verified that my perspective transform was working as expected by transforming
 
 In case of one lane is detected and the other is not, the pipeline uses the curvature of the detected lane to feed in `Line.update_best_curvature()` (line #473 to #493).
 
-To calculate the distance with respect to center, `Line.best_line_base_pos` is used to keep track of the latest filtered base position of the lane. By averaging the `Line.best_line_base_pos` of both lanes, it can determine `x` location of the center of the lane. Assuming the camera is mounted in the middle of the car, the distance between this `x` location to pixel `x=1280//2` would be the result. Then it can be converted to real world distance using `Camera.xm_per_pix`.
+To calculate the distance with respect to center, see code line #540 through #542. It looks for the nonzero pixel along the bottom of `lane_mark_mask` and pick the left-most one as left lane mark and the right-most one as the right lane mark. Assuming the camera is mounted in the middle of the car, the distance between this `x` location to pixel `x=1280//2` would be the result. Then it can be converted to real world distance using `Camera.camera.xm_per_pix_unwarped`. 
 
 ```python
-text = "Distance from lane center: {:.1f} (m)".format(((self.left_lane.best_line_base_pos+self.right_lane.best_line_base_pos)/2 - 960)*self.camera.xm_per_pix)
+((left_lane_base + right_lane_base)/2 - 1280//2)*self.camera.xm_per_pix_unwarped
 ```
 
 #### 6. Provide an example image of your result plotted back down onto the road such that the lane area is identified clearly.
@@ -107,6 +108,10 @@ text = "Distance from lane center: {:.1f} (m)".format(((self.left_lane.best_line
 I implemented this step in lines #532 through #536 in my code in `adv_lane_finding.py` in `LaneFinding.process_image()`.  Here is an example of my result on a test image:
 
 ![alt text][image6]
+
+This frame demostrates the algorithm is able to detect lane lines under shadow as well as low contrast road surface.
+
+![alt text][image7]
 
 ---
 
